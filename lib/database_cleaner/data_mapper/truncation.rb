@@ -12,7 +12,7 @@ module DataMapper
 
       def truncate_tables(table_names)
         table_names.each do |table_name|
-          adapter.truncate_table table_name
+          self.truncate_table table_name
         end
       end
 
@@ -29,6 +29,11 @@ module DataMapper
         execute("TRUNCATE TABLE #{quote_name(table_name)};")
       end
 
+      def pre_count_truncate_tables(tables, options = {:reset_ids => true})
+        filter = options[:reset_ids] ? method(:has_been_used?) : method(:has_rows?)
+        truncate_tables(tables.select(&filter))
+      end
+
       # copied from activerecord
       def disable_referential_integrity
         old = select("SELECT @@FOREIGN_KEY_CHECKS;")
@@ -40,6 +45,31 @@ module DataMapper
         end
       end
 
+      private
+
+      def row_count(table)
+        select("SELECT EXISTS (SELECT 1 FROM #{quote_name(table)} LIMIT 1)").first
+      end
+
+      # Returns a boolean indicating if the given table has an auto-inc number higher than 0.
+      # Note, this is different than an empty table since an table may populated, the index increased,
+      # but then the table is cleaned.  In other words, this function tells us if the given table
+      # was ever inserted into.
+      def has_been_used?(table)
+        if has_rows?(table)
+          true
+        else
+          select(<<-SQL).first.to_i > 1
+          SELECT Auto_increment
+          FROM information_schema.tables
+          WHERE table_name='#{table}';
+          SQL
+        end
+      end
+
+      def has_rows?(table)
+        row_count(table) > 0
+      end
     end
 
     module SqliteAdapterMethods
@@ -152,7 +182,11 @@ module DatabaseCleaner
       def clean(repository = self.db)
         adapter = ::DataMapper.repository(repository).adapter
         adapter.disable_referential_integrity do
-          adapter.truncate_tables(tables_to_truncate(repository))
+          if pre_count? && adapter.respond_to?(:pre_count_truncate_tables)
+            adapter.pre_count_truncate_tables(tables_to_truncate(repository), {:reset_ids => reset_ids?})
+          else
+            adapter.truncate_tables(tables_to_truncate(repository))
+          end
         end
       end
 
@@ -165,6 +199,14 @@ module DatabaseCleaner
       # overwritten
       def migration_storage_names
         %w[migration_info]
+      end
+
+      def pre_count?
+        @pre_count == true
+      end
+
+      def reset_ids?
+        @reset_ids != false
       end
 
     end
